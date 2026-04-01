@@ -225,14 +225,15 @@ class MainWindow(QMainWindow):
         self.preview_table.setRowCount(len(sample))
         for r, row in enumerate(sample):
             for c, col in enumerate(data.columns):
-                self.preview_table.setItem(r, c, QTableWidgetItem(row.get(col, "")))
+                self.preview_table.setItem(r, c, QTableWidgetItem(row.display.get(col, "")))
             assigned = self._resolve_tpl_label(row)
             self.preview_table.setItem(r, len(cols) - 1, QTableWidgetItem(assigned))
         self.preview_table.resizeColumnsToContents()
 
-    def _resolve_tpl_label(self, row: dict[str, str]) -> str:
+    def _resolve_tpl_label(self, row) -> str:
         try:
-            n = parse_numeric(row.get("apr_omitido", ""))
+            apr_source = row.raw.get("apr_omitido")
+            n = parse_numeric(apr_source if apr_source is not None else row.display.get("apr_omitido", ""))
             if n == 0:
                 return "cero"
             if n < 0:
@@ -250,7 +251,7 @@ class MainWindow(QMainWindow):
         row = self.excel_data.rows[selected]
         tpl = self._resolve_tpl_label(row)
         placeholders = self.placeholders_by_tpl.get(tpl, set())
-        lines = [f"{p} => {row.get(p, '')}" for p in sorted(placeholders)]
+        lines = [f"{p} => {row.display.get(p, '')}" for p in sorted(placeholders)]
         self.preview_row_placeholders.setPlainText("\n".join(lines))
 
     def run_generation(self) -> None:

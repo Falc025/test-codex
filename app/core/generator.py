@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.core.excel_reader import ExcelRow
 from app.core.template_engine import TemplateEngine
 from app.services.logging_service import LoggingService
 from app.services.report_service import ReportService
@@ -33,7 +34,7 @@ class DocumentGenerator:
 
     def generate(
         self,
-        rows: list[dict[str, str]],
+        rows: list[ExcelRow],
         tpl_zero: str,
         tpl_neg: str,
         tpl_pos: str,
@@ -50,45 +51,48 @@ class DocumentGenerator:
         err = 0
         warns = 0
 
-        for idx, row in enumerate(rows, start=1):
-            ruc = row.get("ruc", "")
-            razon = row.get("razon_social", "")
-            periodo = row.get("periodo", "")
+        for idx, row_obj in enumerate(rows, start=1):
+            raw = row_obj.raw
+            display = row_obj.display
+            ruc = display.get("ruc", "")
+            razon = display.get("razon_social", "")
+            periodo = display.get("periodo", "")
             try:
-                apr_value = parse_numeric(row.get("apr_omitido", ""))
+                apr_source = raw.get("apr_omitido")
+                apr_value = parse_numeric(apr_source if apr_source is not None else display.get("apr_omitido", ""))
                 tpl_key, tpl_path = self._select_template(apr_value, Path(tpl_zero), Path(tpl_neg), Path(tpl_pos))
 
                 template_placeholders = placeholders_by_tpl.get(tpl_key, set())
-                data = {ph: row.get(ph, "") for ph in template_placeholders}
+                data_display = {ph: display.get(ph, "") for ph in template_placeholders}
                 for ph in template_placeholders:
-                    if ph not in row:
+                    if ph not in display:
                         warns += 1
-                        msg = f"Fila {idx}: columna faltante para placeholder '{ph}', se reemplaza con vacío"
+                        msg = f"Fila {row_obj.source_row}: columna faltante para placeholder '{ph}', se reemplaza con vacío"
                         logger.warning(msg)
                         log_cb(msg)
 
                 filename = f"{tpl_key}_{sanitize_filename(ruc, 'sinruc')}_{sanitize_filename(razon, 'sinrazon')}_{sanitize_filename(periodo, 'sinperiodo')}.docx"
                 output_path = unique_path(out / filename)
-                self.template_engine.render(tpl_path, data, output_path)
+                self.template_engine.render(tpl_path, data_display, output_path)
                 ok += 1
 
                 status = "OK"
                 detail = ""
                 generated = str(output_path)
-                logger.info(f"Fila {idx} generada correctamente: {generated}")
-                log_cb(f"OK fila {idx}: {generated}")
+                logger.info(f"Fila Excel {row_obj.source_row} generada correctamente: {generated}")
+                log_cb(f"OK fila Excel {row_obj.source_row}: {generated}")
             except Exception as exc:
                 err += 1
                 status = "ERROR"
                 detail = str(exc)
                 generated = ""
                 tpl_key = ""
-                logger.error(f"Fila {idx} con error: {exc}")
-                log_cb(f"ERROR fila {idx}: {exc}")
+                logger.error(f"Fila Excel {row_obj.source_row} con error: {exc}")
+                log_cb(f"ERROR fila Excel {row_obj.source_row}: {exc}")
 
             results.append(
                 {
-                    "fila": str(idx),
+                    "fila": str(row_obj.source_row),
                     "ruc": ruc,
                     "razon_social": razon,
                     "periodo": periodo,

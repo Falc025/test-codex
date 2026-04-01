@@ -12,6 +12,9 @@ Aplicación de escritorio en **PySide6** para uso interno. Permite cargar un Exc
   - `< 0` → `plantilla_total_negativo`
   - `> 0` → `plantilla_total_positivo`
 - Conversión robusta de `apr_omitido` (número, texto con comas/puntos, espacios, formatos mixtos).
+- Doble capa de datos por fila:
+  - `_raw` para lógica de negocio (selección de plantilla, validaciones numéricas).
+  - `_display` para reemplazo en Word con formato visible de Excel (`cell.value` + `cell.number_format`).
 - Reemplazo exclusivo de textos `{{campo}}` en párrafos, tablas, encabezados y pies de página.
 - El texto fijo fuera de `{{ }}` **no se modifica**.
 - Preservación de formato general de Word (estructura, tablas, estilos de runs).
@@ -82,6 +85,8 @@ python -m app.main
 - Solo se reemplazan tokens con patrón exacto `{{nombre_campo}}`.
 - Si un placeholder no tiene columna en Excel, se reemplaza por cadena vacía y se registra advertencia.
 - Texto legal fijo, firmas, nombres/cargos y cualquier texto fuera de `{{ }}` no se modifica.
+- Fechas se muestran en formato legible (base `dd/mm/yyyy`).
+- Porcentajes, decimales y miles se renderizan respetando `number_format` de Excel en la medida soportada.
 
 ## Build .exe (Windows)
 
