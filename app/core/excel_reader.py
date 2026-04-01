@@ -30,6 +30,35 @@ class ExcelData:
 
 
 class ExcelReader:
+    MONTH_ABBR_ES = {
+        1: "Ene",
+        2: "Feb",
+        3: "Mar",
+        4: "Abr",
+        5: "May",
+        6: "Jun",
+        7: "Jul",
+        8: "Ago",
+        9: "Sep",
+        10: "Oct",
+        11: "Nov",
+        12: "Dic",
+    }
+    MONTH_NAME_ES = {
+        1: "Enero",
+        2: "Febrero",
+        3: "Marzo",
+        4: "Abril",
+        5: "Mayo",
+        6: "Junio",
+        7: "Julio",
+        8: "Agosto",
+        9: "Septiembre",
+        10: "Octubre",
+        11: "Noviembre",
+        12: "Diciembre",
+    }
+
     def get_sheet_names(self, excel_path: str | Path) -> list[str]:
         wb = load_workbook(excel_path, data_only=True)
         return wb.sheetnames
@@ -171,21 +200,8 @@ class ExcelReader:
 
     @staticmethod
     def _month_abbr(month: int) -> str:
-        return ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][month - 1]
+        return ExcelReader.MONTH_ABBR_ES[month]
 
     @staticmethod
     def _month_name(month: int) -> str:
-        return [
-            "January",
-            "February",
-            "March",
-            "April",
-            "May",
-            "June",
-            "July",
-            "August",
-            "September",
-            "October",
-            "November",
-            "December",
-        ][month - 1]
+        return ExcelReader.MONTH_NAME_ES[month]
