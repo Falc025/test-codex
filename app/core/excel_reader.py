@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
+import re
 from typing import Any
 
 from openpyxl import load_workbook
@@ -80,7 +81,7 @@ class ExcelReader:
 
         if isinstance(raw, (datetime, date)) or (is_date_format(fmt) and isinstance(raw, (int, float))):
             dt = raw if isinstance(raw, (datetime, date)) else self._excel_serial_to_datetime(raw)
-            return dt.strftime("%d/%m/%Y")
+            return self.format_excel_date(dt, fmt)
 
         if isinstance(raw, (int, float, Decimal)):
             return self._format_number(float(raw), fmt)
@@ -121,3 +122,70 @@ class ExcelReader:
         # Epoch 1899-12-30 for Excel serial dates
         base = datetime(1899, 12, 30)
         return base + timedelta(days=float(value))
+
+    def format_excel_date(self, value: date | datetime, number_format: str) -> str:
+        """
+        Format a date/datetime value according to common Excel date display patterns.
+        Falls back to dd/mm/yyyy for unknown date formats.
+        """
+        dt = value if isinstance(value, datetime) else datetime.combine(value, datetime.min.time())
+        fmt = self._clean_excel_date_format(number_format)
+        lower_fmt = fmt.lower()
+
+        # Supported explicit patterns requested for this project.
+        if re.fullmatch(r"d{1,2}/m{1,2}/y{4}", lower_fmt):
+            day = str(dt.day) if lower_fmt.startswith("d/") else f"{dt.day:02d}"
+            month = str(dt.month) if "/m/" in lower_fmt else f"{dt.month:02d}"
+            return f"{day}/{month}/{dt.year:04d}"
+        if re.fullmatch(r"mm/yyyy", lower_fmt):
+            return f"{dt.month:02d}/{dt.year:04d}"
+        if re.fullmatch(r"mmm-yy", lower_fmt):
+            return f"{self._month_abbr(dt.month)}-{dt.year % 100:02d}"
+        if re.fullmatch(r"mmmm-yy", lower_fmt):
+            return f"{self._month_name(dt.month)}-{dt.year % 100:02d}"
+        if re.fullmatch(r"mmm/yyyy", lower_fmt):
+            return f"{self._month_abbr(dt.month)}/{dt.year:04d}"
+        if re.fullmatch(r"mm-yy", lower_fmt):
+            return f"{dt.month:02d}-{dt.year % 100:02d}"
+
+        # Extra common variants
+        if re.fullmatch(r"dd/mm/yyyy", lower_fmt):
+            return f"{dt.day:02d}/{dt.month:02d}/{dt.year:04d}"
+        if re.fullmatch(r"d/m/yyyy", lower_fmt):
+            return f"{dt.day}/{dt.month}/{dt.year:04d}"
+
+        # Fallback: preserve readable date in a stable default.
+        return dt.strftime("%d/%m/%Y")
+
+    @staticmethod
+    def _clean_excel_date_format(number_format: str) -> str:
+        """
+        Keep the primary section and remove Excel-specific directives
+        (colors/conditions/escaped chars/literals) to simplify matching.
+        """
+        base = (number_format or "").split(";")[0].strip()
+        base = re.sub(r"\[[^\]]*\]", "", base)  # [Red], [$-es-PE], [>=1], etc.
+        base = base.replace("\\", "")
+        base = re.sub(r'"[^"]*"', "", base)
+        return base.strip()
+
+    @staticmethod
+    def _month_abbr(month: int) -> str:
+        return ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][month - 1]
+
+    @staticmethod
+    def _month_name(month: int) -> str:
+        return [
+            "January",
+            "February",
+            "March",
+            "April",
+            "May",
+            "June",
+            "July",
+            "August",
+            "September",
+            "October",
+            "November",
+            "December",
+        ][month - 1]
