@@ -126,25 +126,52 @@ class ExcelReader:
             return f"{scaled:.{decimals}f}%"
 
         decimals = self._count_decimals(fmt)
-        use_thousands = "," in fmt.split(".")[0]
-
-        quantized = Decimal(str(value)).quantize(Decimal(f"1.{'0' * decimals}"), rounding=ROUND_HALF_UP) if decimals > 0 else Decimal(str(value)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
-
-        if decimals > 0:
-            py_fmt = f",.{decimals}f" if use_thousands else f".{decimals}f"
-            return format(float(quantized), py_fmt)
-
-        py_fmt = ",.0f" if use_thousands else ".0f"
-        return format(float(quantized), py_fmt)
+        use_thousands = "#" in fmt and any(sep in fmt for sep in ("#,##", "# ##", "#.##"))
+        return self.format_number_es(value=value, decimals=decimals, use_thousands=use_thousands)
 
     @staticmethod
     def _count_decimals(fmt: str) -> int:
-        if "." not in fmt:
+        clean_fmt = (fmt or "").split(";", 1)[0]
+        matches = re.findall(r"[.,]([0#]+)", clean_fmt)
+        if not matches:
             return 0
-        decimal_part = fmt.split(".", 1)[1]
-        decimal_part = decimal_part.split("%", 1)[0]
-        decimal_part = "".join(ch for ch in decimal_part if ch in {"0", "#"})
-        return len(decimal_part)
+        return len(matches[-1])
+
+    @staticmethod
+    def format_number_es(value: float | int | Decimal, decimals: int = 2, use_thousands: bool = True) -> str:
+        """
+        Formato numérico estilo español (RAE):
+        - miles con espacio
+        - decimales con coma
+        Independiente de locale/configuración del sistema.
+        """
+        if value is None:
+            return ""
+
+        try:
+            dec_value = Decimal(str(value))
+        except Exception:
+            return str(value).strip()
+
+        quant = Decimal(f"1.{'0' * decimals}") if decimals > 0 else Decimal("1")
+        quantized = dec_value.quantize(quant, rounding=ROUND_HALF_UP)
+        sign = "-" if quantized < 0 else ""
+        normalized = format(abs(quantized), f".{decimals}f")
+
+        if "." in normalized:
+            integer_part, decimal_part = normalized.split(".", 1)
+        else:
+            integer_part, decimal_part = normalized, ""
+
+        if use_thousands:
+            groups: list[str] = []
+            for i in range(len(integer_part), 0, -3):
+                groups.append(integer_part[max(0, i - 3):i])
+            integer_part = " ".join(reversed(groups))
+
+        if decimals > 0:
+            return f"{sign}{integer_part},{decimal_part}"
+        return f"{sign}{integer_part}"
 
     @staticmethod
     def _excel_serial_to_datetime(value: float) -> datetime:
