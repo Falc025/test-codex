@@ -47,7 +47,7 @@ pip install -r requirements.txt
 
 ## Ejemplo funcional mínimo
 
-1. Crear Excel + 3 plantillas de ejemplo:
+1. Crear archivos de ejemplo (Excel + plantilla):
 
 ```bash
 python scripts/create_sample_files.py
