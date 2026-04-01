@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -29,16 +27,19 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Generador Documental Local")
-        self.resize(840, 520)
+        self.resize(980, 620)
 
         self.excel_reader = ExcelReader()
         self.document_builder = DocumentBuilder()
-        self.current_data: DocumentData | None = None
+        self.current_records: list[DocumentData] = []
 
         self.excel_input = QLineEdit()
-        self.template_input = QLineEdit()
+        self.template_zero_input = QLineEdit()
+        self.template_positive_input = QLineEdit()
+        self.template_negative_input = QLineEdit()
         self.output_input = QLineEdit()
 
+        self.preview_count = QLabel("0")
         self.preview_expediente = QLabel("-")
         self.preview_fecha = QLabel("-")
         self.preview_administrado = QLabel("-")
@@ -58,26 +59,35 @@ class MainWindow(QMainWindow):
 
         files_layout.addRow("Archivo Excel:", self._line_with_button(self.excel_input, self._select_excel))
         files_layout.addRow(
-            "Plantilla Word:",
-            self._line_with_button(self.template_input, self._select_template),
+            "Plantilla total = 0:",
+            self._line_with_button(self.template_zero_input, lambda: self._select_template(self.template_zero_input)),
+        )
+        files_layout.addRow(
+            "Plantilla total > 0:",
+            self._line_with_button(self.template_positive_input, lambda: self._select_template(self.template_positive_input)),
+        )
+        files_layout.addRow(
+            "Plantilla total < 0:",
+            self._line_with_button(self.template_negative_input, lambda: self._select_template(self.template_negative_input)),
         )
         files_layout.addRow(
             "Carpeta salida:",
             self._line_with_button(self.output_input, self._select_output_dir),
         )
 
-        preview_group = QGroupBox("Previsualización de datos")
+        preview_group = QGroupBox("Previsualización")
         preview_layout = QFormLayout(preview_group)
-        preview_layout.addRow("Expediente:", self.preview_expediente)
-        preview_layout.addRow("Fecha:", self.preview_fecha)
-        preview_layout.addRow("Administrado:", self.preview_administrado)
+        preview_layout.addRow("Registros detectados:", self.preview_count)
+        preview_layout.addRow("Primer expediente/SIGED:", self.preview_expediente)
+        preview_layout.addRow("Primera fecha:", self.preview_fecha)
+        preview_layout.addRow("Primer administrado:", self.preview_administrado)
 
         actions_layout = QHBoxLayout()
         btn_load = QPushButton("Cargar Excel")
         btn_load.clicked.connect(self._load_preview)
 
-        btn_generate = QPushButton("Generar documento")
-        btn_generate.clicked.connect(self._generate_document)
+        btn_generate = QPushButton("Generar documentos")
+        btn_generate.clicked.connect(self._generate_documents)
 
         actions_layout.addWidget(btn_load)
         actions_layout.addWidget(btn_generate)
@@ -108,11 +118,10 @@ class MainWindow(QMainWindow):
         return container
 
     def _set_defaults(self) -> None:
-        default_template = resource_path("templates/plantilla_base.docx")
-        default_output = resource_path("output")
-
-        self.template_input.setText(str(default_template))
-        self.output_input.setText(str(default_output))
+        self.template_zero_input.setText(str(resource_path("templates/plantilla_total_cero.docx")))
+        self.template_positive_input.setText(str(resource_path("templates/plantilla_total_positivo.docx")))
+        self.template_negative_input.setText(str(resource_path("templates/plantilla_total_negativo.docx")))
+        self.output_input.setText(str(resource_path("output")))
 
     def _select_excel(self) -> None:
         file_path, _ = QFileDialog.getOpenFileName(
@@ -124,7 +133,7 @@ class MainWindow(QMainWindow):
         if file_path:
             self.excel_input.setText(file_path)
 
-    def _select_template(self) -> None:
+    def _select_template(self, target_input: QLineEdit) -> None:
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Seleccionar plantilla Word",
@@ -132,7 +141,7 @@ class MainWindow(QMainWindow):
             "Word (*.docx)",
         )
         if file_path:
-            self.template_input.setText(file_path)
+            target_input.setText(file_path)
 
     def _select_output_dir(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "Seleccionar carpeta de salida")
@@ -141,7 +150,7 @@ class MainWindow(QMainWindow):
 
     def _load_preview(self) -> None:
         try:
-            data = self.excel_reader.read_document_data(self.excel_input.text())
+            records = self.excel_reader.read_document_data(self.excel_input.text())
         except ValidationError as exc:
             self._show_error(str(exc))
             return
@@ -149,32 +158,43 @@ class MainWindow(QMainWindow):
             self._show_error(f"Error inesperado al leer Excel: {exc}")
             return
 
-        self.current_data = data
-        self.preview_expediente.setText(data.expediente)
-        self.preview_fecha.setText(data.fecha)
-        self.preview_administrado.setText(data.administrado)
-        self._log("Datos cargados correctamente.")
+        self.current_records = records
+        first = records[0]
+        preview = first.preview_values()
 
-    def _generate_document(self) -> None:
-        if self.current_data is None:
-            self._show_error("Primero cargue y valide datos desde el Excel.")
+        self.preview_count.setText(str(len(records)))
+        self.preview_expediente.setText(preview["expediente"] or "-")
+        self.preview_fecha.setText(preview["fecha"] or "-")
+        self.preview_administrado.setText(preview["administrado"] or "-")
+        self._log(f"Excel cargado: {len(records)} registros listos para generar.")
+
+    def _generate_documents(self) -> None:
+        if not self.current_records:
+            self._show_error("Primero cargue y valide el Excel.")
             return
 
         try:
-            output_path = self.document_builder.build(
-                template_path=self.template_input.text(),
+            generated_paths = self.document_builder.build_many(
+                records=self.current_records,
+                template_zero=self.template_zero_input.text(),
+                template_positive=self.template_positive_input.text(),
+                template_negative=self.template_negative_input.text(),
                 output_dir=self.output_input.text(),
-                data=self.current_data,
             )
         except ValidationError as exc:
             self._show_error(str(exc))
             return
         except Exception as exc:
-            self._show_error(f"Error inesperado al generar documento: {exc}")
+            self._show_error(f"Error inesperado al generar documentos: {exc}")
             return
 
-        self._log(f"Documento generado con éxito: {output_path}")
-        QMessageBox.information(self, "Éxito", f"Documento generado:\n{output_path}")
+        self._log(f"Generación completada: {len(generated_paths)} documentos creados.")
+        self._log(f"Ejemplo de salida: {generated_paths[0]}")
+        QMessageBox.information(
+            self,
+            "Éxito",
+            f"Se generaron {len(generated_paths)} documentos en:\n{self.output_input.text()}",
+        )
 
     def _show_error(self, message: str) -> None:
         self._log(f"ERROR: {message}")

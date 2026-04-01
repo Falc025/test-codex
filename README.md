@@ -1,6 +1,15 @@
 # Generador Documental Local (MVP)
 
-Aplicación de escritorio en Python para leer datos desde Excel y generar documentos Word localmente.
+Aplicación de escritorio en Python para leer datos tabulares desde Excel y generar documentos Word localmente.
+
+## Flujo principal implementado
+
+- La hoja `Datos` se interpreta como tabla (1 registro por fila).
+- Se genera **un documento por cada registro**.
+- Se usan 3 plantillas según el valor del campo `total`:
+  - `total == 0` → plantilla de cero
+  - `total > 0` → plantilla de positivo
+  - `total < 0` → plantilla de negativo
 
 ## Estructura
 
@@ -52,25 +61,31 @@ python main.py
 
 3. En la interfaz:
    - Seleccionar `sample_input.xlsx`
-   - Verificar plantilla `templates/plantilla_base.docx`
+   - Seleccionar `templates/plantilla_total_cero.docx`
+   - Seleccionar `templates/plantilla_total_positivo.docx`
+   - Seleccionar `templates/plantilla_total_negativo.docx`
    - Seleccionar carpeta `output/`
    - Clic en **Cargar Excel**
-   - Clic en **Generar documento**
+   - Clic en **Generar documentos**
 
-## Supuestos de datos del Excel (MVP)
+## Formato de Excel esperado (hoja `Datos`)
 
-- Hoja requerida: `Datos`
-- Estructura clave/valor en columnas A:B
-- Campos obligatorios:
-  - `expediente`
-  - `fecha`
-  - `administrado`
+La fila 1 debe tener encabezados. Columnas mínimas requeridas:
 
-## Marcadores de plantilla Word
+- `ruc`
+- `razon_social`
+- `domicilio`
+- `periodo`
+- `total`
 
-- `{{expediente}}`
-- `{{fecha}}`
-- `{{administrado}}`
+## Marcadores soportados en Word
+
+La app reemplaza ambos formatos de marcador:
+
+- `{{clave}}`
+- `{clave}`
+
+Ejemplos de claves: `{{n° siged}}`, `{{ruc}}`, `{{razon_social}}`, `{{periodo}}`, `{{total}}`, `{{sector}}`.
 
 ## Empaquetado base con PyInstaller
 
@@ -80,14 +95,3 @@ pyinstaller --noconfirm --windowed --name GeneradorDocumental \
   --add-data "output;output" \
   main.py
 ```
-
-> En PowerShell puede usarse el comando en una sola línea para evitar problemas con `\`.
-
-## Buenas prácticas aplicadas
-
-- Arquitectura por capas (UI, servicios, modelo, utilidades)
-- Validaciones aisladas y reutilizables
-- Modelo de datos con `dataclass`
-- Manejo explícito de errores para feedback al usuario
-- Preparación para escalabilidad (múltiples plantillas y tablas)
-- Resolución de rutas compatible con entorno PyInstaller

@@ -9,12 +9,12 @@ from services.validator import InputValidator, ValidationError
 
 
 class ExcelReader:
-    """Lee Excel estructurado y transforma información a modelo de dominio."""
+    """Lee registros desde Excel tabular y produce una lista de DocumentData."""
 
     def __init__(self, validator: InputValidator | None = None) -> None:
         self.validator = validator or InputValidator()
 
-    def read_document_data(self, excel_path: str | Path) -> DocumentData:
+    def read_document_data(self, excel_path: str | Path) -> list[DocumentData]:
         validated_path = self.validator.validate_excel_path(excel_path)
 
         try:
@@ -25,21 +25,23 @@ class ExcelReader:
         self.validator.validate_sheet_exists(workbook.sheetnames)
         sheet = workbook[InputValidator.REQUIRED_SHEET]
 
-        # Formato esperado del MVP:
-        # Hoja 'Datos' con pares clave/valor en columnas A:B.
-        # A2='expediente', B2='EXP-001' ...
-        raw_data: dict[str, object] = {}
-        for row in sheet.iter_rows(min_row=1, max_col=2, values_only=True):
-            key, value = row
-            if not key:
+        rows = list(sheet.iter_rows(values_only=True))
+        if not rows:
+            raise ValidationError("La hoja 'Datos' está vacía.")
+
+        headers = [str(cell).strip().lower() if cell is not None else "" for cell in rows[0]]
+        self.validator.validate_header_columns(headers)
+
+        records: list[DocumentData] = []
+        for idx, row in enumerate(rows[1:], start=2):
+            if all(cell is None or str(cell).strip() == "" for cell in row):
                 continue
-            normalized_key = str(key).strip().lower()
-            raw_data[normalized_key] = value
 
-        self.validator.validate_required_fields(raw_data)
+            raw = {headers[col_idx]: value for col_idx, value in enumerate(row) if col_idx < len(headers) and headers[col_idx]}
+            self.validator.validate_row_data(raw, idx)
+            records.append(DocumentData.from_raw(raw, row_number=idx))
 
-        return DocumentData.from_raw(
-            expediente=raw_data["expediente"],
-            fecha_value=raw_data["fecha"],
-            administrado=raw_data["administrado"],
-        )
+        if not records:
+            raise ValidationError("No se encontraron registros válidos en la hoja 'Datos'.")
+
+        return records

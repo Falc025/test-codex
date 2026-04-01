@@ -10,7 +10,13 @@ class ValidationError(Exception):
 
 class InputValidator:
     REQUIRED_SHEET = "Datos"
-    REQUIRED_FIELDS = ("expediente", "fecha", "administrado")
+    REQUIRED_COLUMNS = (
+        "ruc",
+        "razon_social",
+        "domicilio",
+        "periodo",
+        "total",
+    )
 
     @staticmethod
     def validate_excel_path(path: str | Path) -> Path:
@@ -25,7 +31,7 @@ class InputValidator:
     def validate_template_path(path: str | Path) -> Path:
         template_path = Path(path)
         if not template_path.exists() or not template_path.is_file():
-            raise ValidationError("La plantilla Word no existe o no es accesible.")
+            raise ValidationError(f"La plantilla no existe: {template_path}")
         if template_path.suffix.lower() != ".docx":
             raise ValidationError("La plantilla debe ser un archivo .docx.")
         return template_path
@@ -43,9 +49,26 @@ class InputValidator:
             raise ValidationError(f"No se encontró la hoja requerida '{cls.REQUIRED_SHEET}'.")
 
     @classmethod
-    def validate_required_fields(cls, data: dict[str, object]) -> None:
-        missing = [field for field in cls.REQUIRED_FIELDS if not str(data.get(field, "")).strip()]
+    def validate_header_columns(cls, header_columns: list[str]) -> None:
+        header_set = {col.strip().lower() for col in header_columns if col}
+        missing = [col for col in cls.REQUIRED_COLUMNS if col not in header_set]
         if missing:
             raise ValidationError(
-                "Faltan campos obligatorios en el Excel: " + ", ".join(missing)
+                "Faltan columnas obligatorias en la hoja 'Datos': " + ", ".join(missing)
             )
+
+    @classmethod
+    def validate_row_data(cls, data: dict[str, object], row_number: int) -> None:
+        missing = [col for col in cls.REQUIRED_COLUMNS if not str(data.get(col, "")).strip()]
+        if missing:
+            raise ValidationError(
+                f"Fila {row_number}: faltan campos obligatorios ({', '.join(missing)})."
+            )
+
+    @classmethod
+    def validate_templates(cls, zero_path: str | Path, positive_path: str | Path, negative_path: str | Path) -> tuple[Path, Path, Path]:
+        return (
+            cls.validate_template_path(zero_path),
+            cls.validate_template_path(positive_path),
+            cls.validate_template_path(negative_path),
+        )

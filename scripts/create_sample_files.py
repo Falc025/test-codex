@@ -6,42 +6,69 @@ from docx import Document
 from openpyxl import Workbook
 
 BASE_DIR = Path(__file__).resolve().parents[1]
-TEMPLATE_PATH = BASE_DIR / "templates" / "plantilla_base.docx"
+TEMPLATE_ZERO = BASE_DIR / "templates" / "plantilla_total_cero.docx"
+TEMPLATE_POSITIVE = BASE_DIR / "templates" / "plantilla_total_positivo.docx"
+TEMPLATE_NEGATIVE = BASE_DIR / "templates" / "plantilla_total_negativo.docx"
 EXCEL_PATH = BASE_DIR / "sample_input.xlsx"
+
+HEADERS = [
+    "tipo",
+    "año",
+    "n° siged",
+    "ruc",
+    "razon_social",
+    "domicilio",
+    "periodo",
+    "resul_req",
+    "fecha_not_req",
+    "fecha_venci",
+    "bi_det",
+    "alicuota",
+    "apr_det",
+    "apr_decla",
+    "apr_omitido",
+    "int_moratorio",
+    "total",
+    "sector",
+]
+
+ROWS = [
+    ["RD", 2026, "202500291865", "20137913250", "ANGLO AMERICAN QUELLAVECO S.A.", "Calle Bernardo Monteagudo 222", "Ene-21", "25-2026-RQ-OS/UATGC", "10/01/2026", "26/02/2021", "0,00", "0,14%", "0,00", "0,00", "0,00", "0,00", "0,00", "Minería"],
+    ["RD", 2026, "202500291865", "20137913250", "ANGLO AMERICAN QUELLAVECO S.A.", "Calle Bernardo Monteagudo 222", "Ago-21", "25-2026-RQ-OS/UATGC", "10/01/2026", "30/09/2021", "200000,00", "0,14%", "280,00", "10,00", "270,00", "20,00", "290,00", "Minería"],
+    ["RD", 2026, "202500291865", "20137913250", "ANGLO AMERICAN QUELLAVECO S.A.", "Calle Bernardo Monteagudo 222", "Nov-21", "25-2026-RQ-OS/UATGC", "10/01/2026", "31/12/2021", "10000,00", "0,14%", "14,00", "100,00", "-86,00", "0,00", "-86,00", "Minería"],
+]
 
 
 def create_excel() -> None:
     wb = Workbook()
     ws = wb.active
     ws.title = "Datos"
-    ws["A1"] = "campo"
-    ws["B1"] = "valor"
-    ws["A2"] = "expediente"
-    ws["B2"] = "EXP-2026-001"
-    ws["A3"] = "fecha"
-    ws["B3"] = "27/03/2026"
-    ws["A4"] = "administrado"
-    ws["B4"] = "Acme S.A.C."
-
+    ws.append(HEADERS)
+    for row in ROWS:
+        ws.append(row)
     wb.save(EXCEL_PATH)
 
 
-def create_template() -> None:
+def create_template(path: Path, title: str) -> None:
     doc = Document()
-    doc.add_heading("Documento de ejemplo", level=1)
-    doc.add_paragraph("Expediente: {{expediente}}")
-    doc.add_paragraph("Fecha: {{fecha}}")
-    doc.add_paragraph("Administrado: {{administrado}}")
-    doc.add_paragraph("\nTexto adicional para validar el formato base.")
-    doc.save(TEMPLATE_PATH)
+    doc.add_heading(title, level=1)
+    doc.add_paragraph("SIGED: {{n° siged}}")
+    doc.add_paragraph("RUC: {{ruc}}")
+    doc.add_paragraph("RAZÓN SOCIAL: {{razon_social}}")
+    doc.add_paragraph("PERIODO: {{periodo}}")
+    doc.add_paragraph("TOTAL: {{total}}")
+    doc.add_paragraph("SECTOR: {{sector}}")
+    doc.save(path)
 
 
 def main() -> None:
-    TEMPLATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    TEMPLATE_ZERO.parent.mkdir(parents=True, exist_ok=True)
     create_excel()
-    create_template()
+    create_template(TEMPLATE_ZERO, "Plantilla para TOTAL = 0")
+    create_template(TEMPLATE_POSITIVE, "Plantilla para TOTAL > 0")
+    create_template(TEMPLATE_NEGATIVE, "Plantilla para TOTAL < 0")
     print(f"Excel de ejemplo creado en: {EXCEL_PATH}")
-    print(f"Plantilla de ejemplo creada en: {TEMPLATE_PATH}")
+    print(f"Plantillas creadas en: {TEMPLATE_ZERO.parent}")
 
 
 if __name__ == "__main__":

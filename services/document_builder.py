@@ -16,18 +16,52 @@ class DocumentBuilder:
     def __init__(self, validator: InputValidator | None = None) -> None:
         self.validator = validator or InputValidator()
 
-    def build(
+    def build_many(
         self,
-        template_path: str | Path,
+        records: list[DocumentData],
+        template_zero: str | Path,
+        template_positive: str | Path,
+        template_negative: str | Path,
         output_dir: str | Path,
-        data: DocumentData,
         filename_prefix: str = "documento",
-    ) -> Path:
-        template = self.validator.validate_template_path(template_path)
+    ) -> list[Path]:
+        tpl_zero, tpl_pos, tpl_neg = self.validator.validate_templates(
+            template_zero,
+            template_positive,
+            template_negative,
+        )
         out_dir = ensure_directory(self.validator.validate_output_dir(output_dir))
 
+        generated: list[Path] = []
+        for index, record in enumerate(records, start=1):
+            template = self._resolve_template(record.total_amount(), tpl_zero, tpl_pos, tpl_neg)
+            generated_path = self._build_one(
+                template_path=template,
+                output_dir=out_dir,
+                data=record,
+                filename_prefix=filename_prefix,
+                sequence=index,
+            )
+            generated.append(generated_path)
+        return generated
+
+    def _resolve_template(self, total: float, tpl_zero: Path, tpl_pos: Path, tpl_neg: Path) -> Path:
+        if total == 0:
+            return tpl_zero
+        if total > 0:
+            return tpl_pos
+        return tpl_neg
+
+    def _build_one(
+        self,
+        template_path: Path,
+        output_dir: Path,
+        data: DocumentData,
+        filename_prefix: str,
+        sequence: int,
+    ) -> Path:
         try:
-            document = Document(template)
+            document = Document(template_path)
         except Exception as exc:
             raise ValidationError(f"No se pudo abrir la plantilla Word: {exc}") from exc
 
@@ -35,9 +69,10 @@ class DocumentBuilder:
         self._replace_in_document(document, placeholders)
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        safe_expediente = data.expediente.replace("/", "-").replace(" ", "_")
-        output_name = f"{filename_prefix}_{safe_expediente}_{timestamp}.docx"
-        output_path = out_dir / output_name
+        siged = data.value("n° siged") or data.value("n_siged") or data.value("expediente") or f"fila{data.row_number}"
+        safe_siged = siged.replace("/", "-").replace(" ", "_")
+        output_name = f"{filename_prefix}_{sequence:03d}_{safe_siged}_{timestamp}.docx"
+        output_path = output_dir / output_name
 
         try:
             document.save(output_path)
@@ -50,7 +85,6 @@ class DocumentBuilder:
         for paragraph in document.paragraphs:
             self._replace_in_paragraph(paragraph, placeholders)
 
-        # Preparado para tablas dinámicas futuras: también se procesan celdas.
         for table in document.tables:
             for row in table.rows:
                 for cell in row.cells:
