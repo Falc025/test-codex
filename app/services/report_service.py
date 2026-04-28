@@ -7,6 +7,9 @@ import pandas as pd
 
 class ReportService:
     COLUMNS = [
+        "tipo_documental",
+        "concepto",
+        "hoja_excel",
         "fila",
         "ruc",
         "razon_social",
@@ -22,9 +25,7 @@ class ReportService:
         self.report_path = output_dir / "reporte_generacion.xlsx"
 
     def save(self, rows: list[dict[str, str]]) -> Path:
-        normalized = []
-        for row in rows:
-            normalized.append({col: row.get(col, "") for col in self.COLUMNS})
+        normalized = [{col: row.get(col, "") for col in self.COLUMNS} for row in rows]
         df = pd.DataFrame(normalized, columns=self.COLUMNS)
         df.to_excel(self.report_path, index=False)
         return self.report_path

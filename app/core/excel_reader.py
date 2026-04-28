@@ -9,7 +9,6 @@ from typing import Any
 
 from openpyxl import load_workbook
 from openpyxl.styles.numbers import is_date_format
-from openpyxl.worksheet.worksheet import Worksheet
 
 from app.utils.text_utils import normalize_column_name
 
@@ -27,6 +26,7 @@ class ExcelData:
     columns: list[str]
     sheet_names: list[str]
     selected_sheet: str
+    warnings: list[str]
 
 
 class ExcelReader:
@@ -64,15 +64,19 @@ class ExcelReader:
         return wb.sheetnames
 
     def read(self, excel_path: str | Path, sheet_name: str | None = None) -> ExcelData:
-        wb = load_workbook(excel_path, data_only=True)
-        selected = sheet_name or wb.sheetnames[0]
-        ws = wb[selected]
+        wb_data = load_workbook(excel_path, data_only=True)
+        wb_formula = load_workbook(excel_path, data_only=False)
 
-        header_row = next(ws.iter_rows(min_row=1, max_row=1))
+        selected = sheet_name or wb_data.sheetnames[0]
+        ws_data = wb_data[selected]
+        ws_formula = wb_formula[selected]
+
+        header_row = next(ws_data.iter_rows(min_row=1, max_row=1))
         headers: list[str] = [normalize_column_name(cell.value) for cell in header_row]
 
         rows: list[ExcelRow] = []
-        for row_idx, row_cells in enumerate(ws.iter_rows(min_row=2), start=2):
+        warnings: list[str] = []
+        for row_idx, row_cells in enumerate(ws_data.iter_rows(min_row=2), start=2):
             row_raw: dict[str, Any] = {}
             row_display: dict[str, str] = {}
             has_content = False
@@ -90,10 +94,22 @@ class ExcelReader:
                 if disp_val != "" or raw_val is not None:
                     has_content = True
 
+                formula_cell = ws_formula.cell(row=row_idx, column=i + 1)
+                if isinstance(formula_cell.value, str) and formula_cell.value.startswith("=") and raw_val is None:
+                    warnings.append(
+                        f"Hoja {selected} fila {row_idx} columna '{col}': fórmula sin valor calculado guardado"
+                    )
+
             if has_content:
                 rows.append(ExcelRow(raw=row_raw, display=row_display, source_row=row_idx))
 
-        return ExcelData(rows=rows, columns=[h for h in headers if h], sheet_names=wb.sheetnames, selected_sheet=selected)
+        return ExcelData(
+            rows=rows,
+            columns=[h for h in headers if h],
+            sheet_names=wb_data.sheetnames,
+            selected_sheet=selected,
+            warnings=warnings,
+        )
 
     def excel_display_value(self, cell) -> str:
         raw = cell.value
@@ -123,9 +139,12 @@ class ExcelReader:
         if "%" in fmt:
             decimals = self._count_decimals(fmt)
             scaled = value * 100
-            return f"{scaled:.{decimals}f}%"
+            # Mantener formato porcentual existente, con conversión decimal a coma institucional.
+            return self.format_number_es(scaled, decimals=decimals, use_thousands=False) + "%"
 
         decimals = self._count_decimals(fmt)
+        if decimals == 0:
+            decimals = 2
         use_thousands = "#" in fmt and any(sep in fmt for sep in ("#,##", "# ##", "#.##"))
         return self.format_number_es(value=value, decimals=decimals, use_thousands=use_thousands)
 
@@ -139,15 +158,8 @@ class ExcelReader:
 
     @staticmethod
     def format_number_es(value: float | int | Decimal, decimals: int = 2, use_thousands: bool = True) -> str:
-        """
-        Formato numérico estilo español (RAE):
-        - miles con espacio
-        - decimales con coma
-        Independiente de locale/configuración del sistema.
-        """
         if value is None:
             return ""
-
         try:
             dec_value = Decimal(str(value))
         except Exception:
@@ -157,11 +169,7 @@ class ExcelReader:
         quantized = dec_value.quantize(quant, rounding=ROUND_HALF_UP)
         sign = "-" if quantized < 0 else ""
         normalized = format(abs(quantized), f".{decimals}f")
-
-        if "." in normalized:
-            integer_part, decimal_part = normalized.split(".", 1)
-        else:
-            integer_part, decimal_part = normalized, ""
+        integer_part, decimal_part = normalized.split(".") if "." in normalized else (normalized, "")
 
         if use_thousands:
             groups: list[str] = []
@@ -175,20 +183,14 @@ class ExcelReader:
 
     @staticmethod
     def _excel_serial_to_datetime(value: float) -> datetime:
-        # Epoch 1899-12-30 for Excel serial dates
         base = datetime(1899, 12, 30)
         return base + timedelta(days=float(value))
 
     def format_excel_date(self, value: date | datetime, number_format: str) -> str:
-        """
-        Format a date/datetime value according to common Excel date display patterns.
-        Falls back to dd/mm/yyyy for unknown date formats.
-        """
         dt = value if isinstance(value, datetime) else datetime.combine(value, datetime.min.time())
         fmt = self._clean_excel_date_format(number_format)
         lower_fmt = fmt.lower()
 
-        # Supported explicit patterns requested for this project.
         if re.fullmatch(r"d{1,2}/m{1,2}/y{4}", lower_fmt):
             day = str(dt.day) if lower_fmt.startswith("d/") else f"{dt.day:02d}"
             month = str(dt.month) if "/m/" in lower_fmt else f"{dt.month:02d}"
@@ -203,24 +205,17 @@ class ExcelReader:
             return f"{self._month_abbr(dt.month)}/{dt.year:04d}"
         if re.fullmatch(r"mm-yy", lower_fmt):
             return f"{dt.month:02d}-{dt.year % 100:02d}"
-
-        # Extra common variants
         if re.fullmatch(r"dd/mm/yyyy", lower_fmt):
             return f"{dt.day:02d}/{dt.month:02d}/{dt.year:04d}"
         if re.fullmatch(r"d/m/yyyy", lower_fmt):
             return f"{dt.day}/{dt.month}/{dt.year:04d}"
 
-        # Fallback: preserve readable date in a stable default.
         return dt.strftime("%d/%m/%Y")
 
     @staticmethod
     def _clean_excel_date_format(number_format: str) -> str:
-        """
-        Keep the primary section and remove Excel-specific directives
-        (colors/conditions/escaped chars/literals) to simplify matching.
-        """
         base = (number_format or "").split(";")[0].strip()
-        base = re.sub(r"\[[^\]]*\]", "", base)  # [Red], [$-es-PE], [>=1], etc.
+        base = re.sub(r"\[[^\]]*\]", "", base)
         base = base.replace("\\", "")
         base = re.sub(r'"[^"]*"', "", base)
         return base.strip()

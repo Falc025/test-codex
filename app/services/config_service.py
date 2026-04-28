@@ -10,11 +10,18 @@ class ConfigService:
         self.config_path = config_path
         self.defaults: dict[str, Any] = {
             "excel_path": "",
-            "template_zero": "",
-            "template_negative": "",
-            "template_positive": "",
             "output_dir": "",
-            "sheet_name": "",
+            "template_rd_apr_cero": "",
+            "template_rd_apr_negativo": "",
+            "template_rd_apr_positivo": "",
+            "template_rd_dge_cero": "",
+            "template_rd_dge_negativo": "",
+            "template_rd_dge_positivo": "",
+            "template_rm_apr_176_1": "",
+            "template_rm_apr_178_1": "",
+            "template_rm_dge_176_1": "",
+            "template_rm_dge_178_1": "",
+            "preview_sheet": "RD_APR",
         }
 
     def load(self) -> dict[str, Any]:
