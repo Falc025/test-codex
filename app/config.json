@@ -1,0 +1,15 @@
+{
+  "excel_path": "",
+  "output_dir": "",
+  "template_rd_apr_cero": "",
+  "template_rd_apr_negativo": "",
+  "template_rd_apr_positivo": "",
+  "template_rd_dge_cero": "",
+  "template_rd_dge_negativo": "",
+  "template_rd_dge_positivo": "",
+  "template_rm_apr_176_1": "",
+  "template_rm_apr_178_1": "",
+  "template_rm_dge_176_1": "",
+  "template_rm_dge_178_1": "",
+  "preview_sheet": "RD_APR"
+}
