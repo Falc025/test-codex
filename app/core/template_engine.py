@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+import xml.etree.ElementTree as ET
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from docx import Document
@@ -18,7 +19,7 @@ class TemplateScan:
 
 class TemplateEngine:
     _token_pattern = re.compile(r"\{\{\s*([a-zA-Z0-9_]+)\s*\}\}")
-    _fragment_pattern = re.compile(r"\{\{(?:[^{}]|<[^>]+>)+\}\}")
+    _word_ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
     def scan_placeholders(self, docx_path: str | Path) -> TemplateScan:
         doc = Document(docx_path)
@@ -103,10 +104,8 @@ class TemplateEngine:
         with ZipFile(src, "r") as zin, ZipFile(temp, "w", compression=ZIP_DEFLATED) as zout:
             for item in zin.infolist():
                 payload = zin.read(item.filename)
-                if item.filename.startswith("word/") and item.filename.endswith(".xml"):
-                    xml = payload.decode("utf-8")
-                    replaced = self._replace_placeholders_in_xml_text(xml, values)
-                    payload = replaced.encode("utf-8")
+                if self._should_process_xml_part(item.filename):
+                    payload = self.replace_placeholders_in_xml_part(payload, values)
                 zout.writestr(item, payload)
         temp.replace(src)
 
@@ -116,25 +115,59 @@ class TemplateEngine:
             for name in zf.namelist():
                 if not (name.startswith("word/") and name.endswith(".xml")):
                     continue
-                xml = zf.read(name).decode("utf-8")
-                stripped = re.sub(r"<[^>]+>", "", xml)
-                placeholders = sorted({m.group(1) for m in self._token_pattern.finditer(stripped)})
+                xml = zf.read(name)
+                placeholders = sorted(self._extract_placeholders_from_xml_part(xml))
                 if placeholders:
                     found[name] = [f"{{{{{p}}}}}" for p in placeholders]
         return found
 
-    def _replace_placeholders_in_xml_text(self, xml_text: str, values: dict[str, str]) -> str:
-        # 1) Reemplazo estándar.
-        replaced = self._token_pattern.sub(lambda m: str(values.get(m.group(1).strip(), "")), xml_text)
+    def replace_placeholders_in_xml_part(self, xml_bytes: bytes, values: dict[str, str]) -> bytes:
+        try:
+            root = ET.fromstring(xml_bytes)
+        except ET.ParseError:
+            return xml_bytes
 
-        # 2) Respaldo para placeholders fragmentados entre nodos XML.
-        def repl_fragment(match: re.Match) -> str:
-            token_with_tags = match.group(0)
-            plain = re.sub(r"<[^>]+>", "", token_with_tags)
-            inner = self._token_pattern.fullmatch(plain)
-            if not inner:
-                return token_with_tags
-            key = inner.group(1).strip()
-            return str(values.get(key, ""))
+        changed = False
+        paragraph_xpath = f".//{{{self._word_ns}}}p"
+        text_xpath = f".//{{{self._word_ns}}}t"
 
-        return self._fragment_pattern.sub(repl_fragment, replaced)
+        for paragraph in root.findall(paragraph_xpath):
+            text_nodes = paragraph.findall(text_xpath)
+            if not text_nodes:
+                continue
+            joined = "".join(node.text or "" for node in text_nodes)
+            if "{{" not in joined:
+                continue
+            replaced = self._token_pattern.sub(lambda m: str(values.get(m.group(1).strip(), "")), joined)
+            if replaced == joined:
+                continue
+            text_nodes[0].text = replaced
+            for node in text_nodes[1:]:
+                node.text = ""
+            changed = True
+
+        # Fallback sobre todo el XML (si no hubo reemplazo por párrafo) para casos especiales.
+        if not changed:
+            xml_text = xml_bytes.decode("utf-8")
+            replaced_xml = self._token_pattern.sub(lambda m: str(values.get(m.group(1).strip(), "")), xml_text)
+            if replaced_xml != xml_text:
+                return replaced_xml.encode("utf-8")
+            return xml_bytes
+
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    def _extract_placeholders_from_xml_part(self, xml_bytes: bytes) -> set[str]:
+        try:
+            root = ET.fromstring(xml_bytes)
+            text_xpath = f".//{{{self._word_ns}}}t"
+            text = "".join(node.text or "" for node in root.findall(text_xpath))
+        except ET.ParseError:
+            text = xml_bytes.decode("utf-8", errors="ignore")
+        return {m.group(1).strip() for m in self._token_pattern.finditer(text)}
+
+    def _should_process_xml_part(self, filename: str) -> bool:
+        if not (filename.startswith("word/") and filename.endswith(".xml")):
+            return False
+        if filename in {"word/document.xml", "word/footnotes.xml", "word/endnotes.xml", "word/comments.xml"}:
+            return True
+        return filename.startswith("word/header") or filename.startswith("word/footer")
