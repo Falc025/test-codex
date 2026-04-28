@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from xml.sax.saxutils import escape as xml_escape
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -40,7 +41,7 @@ class TemplateEngine:
         doc.save(output_path)
 
         # Etapa específica y segura para notas al pie reales (word/footnotes.xml)
-        self.replace_placeholders_in_footnotes(output_path, data)
+        self.replace_placeholders_in_footnotes_xml_preserving_raw(output_path, data)
 
         ok, errors = self.validate_docx_integrity(output_path)
         if not ok:
@@ -107,7 +108,7 @@ class TemplateEngine:
         if cursor < len(replaced_text):
             paragraph.runs[-1].text += replaced_text[cursor:]
 
-    def replace_placeholders_in_footnotes(self, docx_path: str | Path, values: dict[str, str]) -> None:
+    def replace_placeholders_in_footnotes_xml_preserving_raw(self, docx_path: str | Path, values: dict[str, str]) -> None:
         src = Path(docx_path)
         temp = src.with_suffix(".tmp.docx")
 
@@ -119,8 +120,8 @@ class TemplateEngine:
         if not footnotes_exists:
             return
 
-        footnotes_xml = original_entries["word/footnotes.xml"]
-        updated_footnotes = self.replace_placeholders_in_xml_part(footnotes_xml, values)
+        footnotes_xml = original_entries["word/footnotes.xml"].decode("utf-8")
+        updated_footnotes = self._replace_placeholders_in_footnotes_raw_xml(footnotes_xml, values).encode("utf-8")
 
         with ZipFile(temp, "w", compression=ZIP_DEFLATED) as zout:
             for name, payload in original_entries.items():
@@ -131,60 +132,44 @@ class TemplateEngine:
 
         temp.replace(src)
 
-    def replace_placeholders_in_xml_part(self, xml_bytes: bytes, values: dict[str, str]) -> bytes:
-        """
-        Reemplazo estructural seguro para placeholders fragmentados entre múltiples w:t,
-        típico de notas al pie reales.
-        """
-        try:
-            root = ET.fromstring(xml_bytes)
-        except ET.ParseError:
-            return xml_bytes
+    def _replace_placeholders_in_footnotes_raw_xml(self, xml_text: str, values: dict[str, str]) -> str:
+        updated = xml_text
+        for key, raw_value in values.items():
+            value = xml_escape(str(raw_value if raw_value is not None else ""))
+            # Caso 1: placeholder continuo.
+            simple_pattern = re.compile(rf"\{{\{{\s*{re.escape(key)}\s*\}}\}}")
+            updated = simple_pattern.sub(value, updated)
+            # Caso 2: placeholder fragmentado entre <w:t> y posibles tags intermedios (proofErr, etc).
+            updated = self.replace_fragmented_placeholder(updated, key, value)
+        return updated
 
-        paragraph_xpath = f".//{{{self._word_ns}}}p"
-        text_xpath = f".//{{{self._word_ns}}}t"
-        changed = False
+    def replace_fragmented_placeholder(self, xml_text: str, key: str, value: str) -> str:
+        pattern = re.compile(
+            rf"<w:t(?P<t1>[^>]*)>\s*\{{\{{\s*</w:t>"
+            rf"(?P<m1>(?:\s|<[^>]+>)*?)"
+            rf"<w:t(?P<t2>[^>]*)>\s*{re.escape(key)}\s*</w:t>"
+            rf"(?P<m2>(?:\s|<[^>]+>)*?)"
+            rf"<w:t(?P<t3>[^>]*)>\s*\}}\}}\s*</w:t>",
+            re.DOTALL,
+        )
 
-        for paragraph in root.findall(paragraph_xpath):
-            text_nodes = paragraph.findall(text_xpath)
-            if not text_nodes:
-                continue
+        def repl(match: re.Match) -> str:
+            attrs = match.group("t1") or ""
+            return f"<w:t{attrs}>{value}</w:t>"
 
-            logical_text = "".join(node.text or "" for node in text_nodes)
-            if "{{" not in logical_text:
-                continue
-
-            replaced_text = self._token_pattern.sub(lambda m: str(values.get(m.group(1).strip(), "")), logical_text)
-            if replaced_text == logical_text:
-                continue
-
-            # Escribir texto resultante en el primer w:t y limpiar resto involucrado.
-            text_nodes[0].text = replaced_text
-            for node in text_nodes[1:]:
-                node.text = ""
-
-            # Limpiar proofErr residuales solo dentro del párrafo procesado.
-            for parent in paragraph.iter():
-                children = list(parent)
-                for child in children:
-                    if child.tag == f"{{{self._word_ns}}}proofErr":
-                        parent.remove(child)
-
-            changed = True
-
-        if not changed:
-            return xml_bytes
-
-        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+        return pattern.sub(repl, xml_text)
 
     def find_remaining_placeholders(self, docx_path: str | Path) -> dict[str, list[str]]:
         found: dict[str, list[str]] = {}
+        target_parts = {"word/document.xml", "word/footnotes.xml", "word/endnotes.xml"}
         with ZipFile(docx_path, "r") as zf:
             for name in zf.namelist():
                 if not (name.startswith("word/") and name.endswith(".xml")):
                     continue
-                xml = zf.read(name)
-                placeholders = sorted(self._extract_placeholders_from_xml_part(xml))
+                if name not in target_parts and not name.startswith("word/header") and not name.startswith("word/footer"):
+                    continue
+                xml_text = zf.read(name).decode("utf-8", errors="ignore")
+                placeholders = sorted({m.group(1).strip() for m in self._token_pattern.finditer(xml_text)})
                 if placeholders:
                     found[name] = [f"{{{{{p}}}}}" for p in placeholders]
         return found
@@ -214,12 +199,15 @@ class TemplateEngine:
 
                 # no placeholders pendientes en footnotes
                 if "word/footnotes.xml" in names:
-                    remaining_foot = self._extract_placeholders_from_xml_part(zf.read("word/footnotes.xml"))
+                    foot_raw = zf.read("word/footnotes.xml").decode("utf-8", errors="ignore")
+                    remaining_foot = {m.group(1).strip() for m in self._token_pattern.finditer(foot_raw)}
                     if remaining_foot:
                         errors.append(
                             "Placeholders remanentes en word/footnotes.xml: "
                             + ", ".join(f"{{{{{k}}}}}" for k in sorted(remaining_foot))
                         )
+                    if "xmlns:w=" in foot_raw and "ns0:" in foot_raw:
+                        errors.append("word/footnotes.xml contiene prefijos ns0 inesperados")
         except BadZipFile as exc:
             errors.append(f"DOCX no es ZIP válido: {exc}")
 
