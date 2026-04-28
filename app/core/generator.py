@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from app.core.document_registry import MODULES, TEMPLATE_LABELS
@@ -9,6 +10,7 @@ from app.core.excel_reader import ExcelRow
 from app.core.template_engine import TemplateEngine
 from app.services.logging_service import LoggingService
 from app.utils.file_utils import sanitize_filename, unique_path
+from app.utils.text_utils import parse_period_sort_value
 
 
 @dataclass
@@ -23,6 +25,29 @@ class DocumentGenerator:
     def __init__(self, template_engine: TemplateEngine, selector: DocumentSelector) -> None:
         self.template_engine = template_engine
         self.selector = selector
+
+    def sort_records_by_period(self, rows: list[ExcelRow], logger: LoggingService, module_key: str) -> list[ExcelRow]:
+        sortable: list[tuple[ExcelRow, object]] = []
+        for row in rows:
+            period_raw = row.raw.get("periodo")
+            sort_dt = parse_period_sort_value(period_raw)
+            if sort_dt is None:
+                logger.warning(
+                    f"{module_key} fila {row.source_row}: periodo no convertible para orden descendente, se enviará al final"
+                )
+                sort_key = datetime.min
+            else:
+                sort_key = sort_dt
+            sortable.append((row, sort_key))
+        sortable.sort(key=lambda item: item[1], reverse=True)
+        return [item[0] for item in sortable]
+
+    @staticmethod
+    def build_output_filename(record_display: dict[str, str], sheet_name: str) -> str:
+        razon = sanitize_filename(record_display.get("razon_social", "") or "SIN_RAZON")
+        periodo = sanitize_filename(record_display.get("periodo", "") or "SIN_PERIODO")
+        sector = sanitize_filename(record_display.get("sector", "") or "SIN_SECTOR")
+        return f"{sheet_name}_{razon}_{periodo}_{sector}.docx"
 
     def generate_module(
         self,
@@ -46,8 +71,9 @@ class DocumentGenerator:
         err = 0
         warns = 0
         report_rows: list[dict[str, str]] = []
+        ordered_rows = self.sort_records_by_period(rows, logger, module_key)
 
-        for idx, row_obj in enumerate(rows, start=1):
+        for idx, row_obj in enumerate(ordered_rows, start=1):
             raw = row_obj.raw
             display = row_obj.display
             ruc = display.get("ruc", "")
@@ -68,12 +94,13 @@ class DocumentGenerator:
                         logger.warning(msg)
                         log_cb(msg)
 
-                filename = (
-                    f"{module_key}_{selection.template_key}_"
-                    f"{sanitize_filename(ruc, 'sinruc')}_"
-                    f"{sanitize_filename(razon, 'sinrazon')}_"
-                    f"{sanitize_filename(periodo, 'sinperiodo')}.docx"
-                )
+                if not display.get("razon_social"):
+                    warns += 1
+                    logger.warning(f"{module_key} fila {row_obj.source_row}: razon_social vacío, se usará SIN_RAZON")
+                if not display.get("periodo"):
+                    warns += 1
+                    logger.warning(f"{module_key} fila {row_obj.source_row}: periodo vacío, se usará SIN_PERIODO")
+                filename = self.build_output_filename(display, module.sheet_name)
                 output_path = unique_path(out / filename)
                 self.template_engine.render(selection.template_path, data_display, output_path)
 
@@ -107,9 +134,9 @@ class DocumentGenerator:
                 }
             )
 
-            progress_cb(idx, len(rows))
+            progress_cb(idx, len(ordered_rows))
 
         return (
-            GenerationSummary(total_filas=len(rows), ok=ok, error=err, advertencias=warns),
+            GenerationSummary(total_filas=len(ordered_rows), ok=ok, error=err, advertencias=warns),
             report_rows,
         )

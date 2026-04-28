@@ -14,9 +14,10 @@ def ensure_directory(path: str | Path) -> Path:
 
 
 def sanitize_filename(name: str, fallback: str = "archivo") -> str:
-    clean = re.sub(INVALID_WIN_CHARS, "_", str(name or "").strip())
-    clean = re.sub(r"\s+", "_", clean)
-    clean = re.sub(r"_+", "_", clean).strip("._")
+    clean = re.sub(INVALID_WIN_CHARS, " ", str(name or "").strip())
+    clean = re.sub(r"\s+", " ", clean).strip(" .")
+    if len(clean) > 80:
+        clean = clean[:80].rstrip(" .")
     return clean or fallback
 
 

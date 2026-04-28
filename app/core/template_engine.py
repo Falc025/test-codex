@@ -27,33 +27,56 @@ class TemplateEngine:
 
     def render(self, template_path: str | Path, data: dict[str, str], output_path: str | Path) -> None:
         doc = Document(template_path)
-        for paragraph in self._iter_all_paragraphs(doc):
-            self._replace_in_paragraph(paragraph, data)
+        self.replace_in_document(doc, data)
         doc.save(output_path)
 
+    def replace_in_document(self, doc: Document, values: dict[str, str]) -> None:
+        self.replace_in_container(doc, values)
+        for section in doc.sections:
+            for container in [
+                section.header,
+                section.footer,
+                section.first_page_header,
+                section.first_page_footer,
+                section.even_page_header,
+                section.even_page_footer,
+            ]:
+                self.replace_in_container(container, values)
+
+    def replace_in_container(self, container: Any, values: dict[str, str]) -> None:
+        for paragraph in container.paragraphs:
+            self._replace_in_paragraph(paragraph, values)
+        for table in container.tables:
+            self._replace_in_table(table, values)
+
+    def _replace_in_table(self, table: Any, values: dict[str, str]) -> None:
+        for row in table.rows:
+            for cell in row.cells:
+                self.replace_in_container(cell, values)
+
     def _iter_all_paragraphs(self, doc: Document):
-        for p in doc.paragraphs:
-            yield p
+        yield from doc.paragraphs
         for table in doc.tables:
             for row in table.rows:
                 for cell in row.cells:
                     for p in cell.paragraphs:
                         yield p
         for section in doc.sections:
-            for p in section.header.paragraphs:
-                yield p
-            for table in section.header.tables:
-                for row in table.rows:
-                    for cell in row.cells:
-                        for p in cell.paragraphs:
-                            yield p
-            for p in section.footer.paragraphs:
-                yield p
-            for table in section.footer.tables:
-                for row in table.rows:
-                    for cell in row.cells:
-                        for p in cell.paragraphs:
-                            yield p
+            for container in [
+                section.header,
+                section.footer,
+                section.first_page_header,
+                section.first_page_footer,
+                section.even_page_header,
+                section.even_page_footer,
+            ]:
+                for p in container.paragraphs:
+                    yield p
+                for table in container.tables:
+                    for row in table.rows:
+                        for cell in row.cells:
+                            for p in cell.paragraphs:
+                                yield p
 
     def _replace_in_paragraph(self, paragraph: Any, data: dict[str, str]) -> None:
         if not paragraph.runs:
