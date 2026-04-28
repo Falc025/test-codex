@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from zipfile import ZIP_DEFLATED, ZipFile
 
 from docx import Document
 
@@ -17,6 +18,7 @@ class TemplateScan:
 
 class TemplateEngine:
     _token_pattern = re.compile(r"\{\{\s*([a-zA-Z0-9_]+)\s*\}\}")
+    _fragment_pattern = re.compile(r"\{\{(?:[^{}]|<[^>]+>)+\}\}")
 
     def scan_placeholders(self, docx_path: str | Path) -> TemplateScan:
         doc = Document(docx_path)
@@ -29,6 +31,7 @@ class TemplateEngine:
         doc = Document(template_path)
         self.replace_placeholders_in_document(doc, data)
         doc.save(output_path)
+        self.replace_placeholders_in_docx_xml(output_path, data)
 
     def replace_placeholders_in_document(self, doc: Document, values: dict[str, str]) -> None:
         for container in self._iter_all_containers(doc):
@@ -93,3 +96,45 @@ class TemplateEngine:
             cursor += len(segment)
         if cursor < len(replaced_text):
             paragraph.runs[-1].text += replaced_text[cursor:]
+
+    def replace_placeholders_in_docx_xml(self, docx_path: str | Path, values: dict[str, str]) -> None:
+        src = Path(docx_path)
+        temp = src.with_suffix(".tmp.docx")
+        with ZipFile(src, "r") as zin, ZipFile(temp, "w", compression=ZIP_DEFLATED) as zout:
+            for item in zin.infolist():
+                payload = zin.read(item.filename)
+                if item.filename.startswith("word/") and item.filename.endswith(".xml"):
+                    xml = payload.decode("utf-8")
+                    replaced = self._replace_placeholders_in_xml_text(xml, values)
+                    payload = replaced.encode("utf-8")
+                zout.writestr(item, payload)
+        temp.replace(src)
+
+    def find_remaining_placeholders(self, docx_path: str | Path) -> dict[str, list[str]]:
+        found: dict[str, list[str]] = {}
+        with ZipFile(docx_path, "r") as zf:
+            for name in zf.namelist():
+                if not (name.startswith("word/") and name.endswith(".xml")):
+                    continue
+                xml = zf.read(name).decode("utf-8")
+                stripped = re.sub(r"<[^>]+>", "", xml)
+                placeholders = sorted({m.group(1) for m in self._token_pattern.finditer(stripped)})
+                if placeholders:
+                    found[name] = [f"{{{{{p}}}}}" for p in placeholders]
+        return found
+
+    def _replace_placeholders_in_xml_text(self, xml_text: str, values: dict[str, str]) -> str:
+        # 1) Reemplazo estándar.
+        replaced = self._token_pattern.sub(lambda m: str(values.get(m.group(1).strip(), "")), xml_text)
+
+        # 2) Respaldo para placeholders fragmentados entre nodos XML.
+        def repl_fragment(match: re.Match) -> str:
+            token_with_tags = match.group(0)
+            plain = re.sub(r"<[^>]+>", "", token_with_tags)
+            inner = self._token_pattern.fullmatch(plain)
+            if not inner:
+                return token_with_tags
+            key = inner.group(1).strip()
+            return str(values.get(key, ""))
+
+        return self._fragment_pattern.sub(repl_fragment, replaced)

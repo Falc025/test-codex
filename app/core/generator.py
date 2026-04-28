@@ -103,6 +103,16 @@ class DocumentGenerator:
                 filename = self.build_output_filename(display, module.sheet_name)
                 output_path = unique_path(out / filename)
                 self.template_engine.render(selection.template_path, data_display, output_path)
+                remaining = self.template_engine.find_remaining_placeholders(output_path)
+                if remaining:
+                    warns += 1
+                    for xml_name, placeholders in remaining.items():
+                        msg = (
+                            f"{module_key} fila {row_obj.source_row}: placeholders remanentes en {xml_name}: "
+                            f"{', '.join(placeholders)}"
+                        )
+                        logger.warning(msg)
+                        log_cb(msg)
 
                 ok += 1
                 status = "OK"
