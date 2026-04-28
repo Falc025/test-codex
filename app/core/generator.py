@@ -85,7 +85,7 @@ class DocumentGenerator:
             try:
                 selection = self.selector.select(module_key, raw, display, template_paths)
                 template_placeholders = placeholders_by_template.get(selection.template_key, set())
-                data_display = {ph: display.get(ph, "") for ph in template_placeholders}
+                data_display = dict(display)
 
                 for ph in template_placeholders:
                     if ph not in display:
