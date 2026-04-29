@@ -1,0 +1,321 @@
+from __future__ import annotations
+
+import re
+import shutil
+from xml.sax.saxutils import escape as xml_escape
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+import xml.etree.ElementTree as ET
+from zipfile import ZIP_DEFLATED, BadZipFile, ZipFile
+
+from docx import Document
+
+from app.utils.text_utils import extract_placeholders
+
+
+@dataclass
+class TemplateScan:
+    placeholders: set[str]
+
+
+class TemplateEngine:
+    _token_pattern = re.compile(r"\{\{\s*([a-zA-Z0-9_]+)\s*\}\}")
+    _word_ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+    def scan_placeholders(self, docx_path: str | Path) -> TemplateScan:
+        doc = Document(docx_path)
+        found: set[str] = set()
+        for paragraph in self._iter_all_paragraphs(doc):
+            found.update(extract_placeholders(paragraph.text))
+
+        # También escanear placeholders en footnotes reales.
+        with ZipFile(docx_path, "r") as zf:
+            if "word/footnotes.xml" in zf.namelist():
+                found.update(self._extract_placeholders_from_xml_part(zf.read("word/footnotes.xml")))
+
+        return TemplateScan(placeholders=found)
+
+    def render(self, template_path: str | Path, data: dict[str, str], output_path: str | Path) -> None:
+        # Render 100% preservando estructura original del DOCX (incluyendo referencias de notas al pie).
+        shutil.copyfile(template_path, output_path)
+        self.replace_placeholders_in_docx_xml_preserving_raw(output_path, data)
+
+        ok, errors = self.validate_docx_integrity(output_path)
+        if not ok:
+            raise ValueError("DOCX inválido tras procesar notas al pie: " + " | ".join(errors))
+
+    def replace_placeholders_in_docx_xml_preserving_raw(self, docx_path: str | Path, values: dict[str, str]) -> None:
+        src = Path(docx_path)
+        temp = src.with_suffix(".rawxml.tmp.docx")
+        with ZipFile(src, "r") as zin:
+            entries = {name: zin.read(name) for name in zin.namelist()}
+
+        with ZipFile(temp, "w", compression=ZIP_DEFLATED) as zout:
+            for name, payload in entries.items():
+                if self._is_target_xml_part(name):
+                    xml_text = payload.decode("utf-8", errors="ignore")
+                    xml_text = self._replace_placeholders_in_footnotes_raw_xml(xml_text, values)
+                    payload = xml_text.encode("utf-8")
+                zout.writestr(name, payload)
+
+        temp.replace(src)
+
+    def restore_footnote_parts_from_template(self, template_path: str | Path, output_path: str | Path) -> None:
+        tpl_parts: dict[str, bytes] = {}
+        with ZipFile(template_path, "r") as ztpl:
+            for name in (
+                "word/footnotes.xml",
+                "word/endnotes.xml",
+                "word/_rels/document.xml.rels",
+                "[Content_Types].xml",
+            ):
+                if name in ztpl.namelist():
+                    tpl_parts[name] = ztpl.read(name)
+
+        if not tpl_parts:
+            return
+
+        out_path = Path(output_path)
+        temp = out_path.with_suffix(".restore.tmp.docx")
+        with ZipFile(out_path, "r") as zout:
+            out_names = zout.namelist()
+            out_entries = {name: zout.read(name) for name in out_names}
+
+        # Restaurar partes ausentes de notas.
+        for part_name in ("word/footnotes.xml", "word/endnotes.xml"):
+            if part_name in tpl_parts and part_name not in out_entries:
+                out_entries[part_name] = tpl_parts[part_name]
+
+        # Asegurar Relationship de footnotes/endnotes.
+        if "word/_rels/document.xml.rels" in out_entries and "word/_rels/document.xml.rels" in tpl_parts:
+            rels_out = out_entries["word/_rels/document.xml.rels"].decode("utf-8", errors="ignore")
+            rels_tpl = tpl_parts["word/_rels/document.xml.rels"].decode("utf-8", errors="ignore")
+            for rel_type in ("/footnotes", "/endnotes"):
+                if rel_type not in rels_out:
+                    rel_match = re.search(rf"<Relationship[^>]+Type=\"[^\"]*{re.escape(rel_type)}\"[^>]*/>", rels_tpl)
+                    if rel_match:
+                        rels_out = rels_out.replace("</Relationships>", rel_match.group(0) + "</Relationships>")
+            out_entries["word/_rels/document.xml.rels"] = rels_out.encode("utf-8")
+
+        # Asegurar content types para notas.
+        if "[Content_Types].xml" in out_entries and "[Content_Types].xml" in tpl_parts:
+            ct_out = out_entries["[Content_Types].xml"].decode("utf-8", errors="ignore")
+            ct_tpl = tpl_parts["[Content_Types].xml"].decode("utf-8", errors="ignore")
+            for part_name in ("/word/footnotes.xml", "/word/endnotes.xml"):
+                if part_name not in ct_out:
+                    ov = re.search(rf"<Override[^>]+PartName=\"{re.escape(part_name)}\"[^>]*/>", ct_tpl)
+                    if ov:
+                        ct_out = ct_out.replace("</Types>", ov.group(0) + "</Types>")
+            out_entries["[Content_Types].xml"] = ct_out.encode("utf-8")
+
+        with ZipFile(temp, "w", compression=ZIP_DEFLATED) as znew:
+            for name, payload in out_entries.items():
+                znew.writestr(name, payload)
+        temp.replace(out_path)
+
+    def replace_placeholders_in_document(self, doc: Document, values: dict[str, str]) -> None:
+        for container in self._iter_all_containers(doc):
+            self.replace_placeholders_in_container(container, values)
+
+    def replace_placeholders_in_container(self, container: Any, values: dict[str, str]) -> None:
+        for paragraph in container.paragraphs:
+            self._replace_in_paragraph(paragraph, values)
+        for table in container.tables:
+            self._replace_in_table(table, values)
+
+    def _replace_in_table(self, table: Any, values: dict[str, str]) -> None:
+        for row in table.rows:
+            for cell in row.cells:
+                self.replace_placeholders_in_container(cell, values)
+
+    def _iter_all_containers(self, doc: Document):
+        yield doc
+        visited: set[int] = set()
+        for section in doc.sections:
+            containers = [
+                section.header,
+                section.footer,
+                section.first_page_header,
+                section.first_page_footer,
+                section.even_page_header,
+                section.even_page_footer,
+            ]
+            for container in containers:
+                if id(container) in visited:
+                    continue
+                visited.add(id(container))
+                yield container
+
+    def _iter_all_paragraphs(self, doc: Document):
+        for container in self._iter_all_containers(doc):
+            for p in container.paragraphs:
+                yield p
+            for table in container.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        for p in cell.paragraphs:
+                            yield p
+
+    def _replace_in_paragraph(self, paragraph: Any, data: dict[str, str]) -> None:
+        if not paragraph.runs:
+            return
+        original_text = "".join(run.text for run in paragraph.runs)
+        replaced_text = self._token_pattern.sub(lambda m: data.get(m.group(1).strip(), ""), original_text)
+        if replaced_text == original_text:
+            return
+
+        lengths = [len(run.text) for run in paragraph.runs]
+        cursor = 0
+        for i, run in enumerate(paragraph.runs):
+            take = lengths[i]
+            segment = replaced_text[cursor: cursor + take]
+            run.text = segment
+            cursor += len(segment)
+        if cursor < len(replaced_text):
+            paragraph.runs[-1].text += replaced_text[cursor:]
+
+    def replace_placeholders_in_footnotes_xml_preserving_raw(self, docx_path: str | Path, values: dict[str, str]) -> None:
+        src = Path(docx_path)
+        temp = src.with_suffix(".tmp.docx")
+
+        with ZipFile(src, "r") as zin:
+            names = zin.namelist()
+            footnotes_exists = "word/footnotes.xml" in names
+            original_entries = {name: zin.read(name) for name in names}
+
+        if not footnotes_exists:
+            return
+
+        footnotes_xml = original_entries["word/footnotes.xml"].decode("utf-8")
+        updated_footnotes = self._replace_placeholders_in_footnotes_raw_xml(footnotes_xml, values).encode("utf-8")
+
+        with ZipFile(temp, "w", compression=ZIP_DEFLATED) as zout:
+            for name, payload in original_entries.items():
+                if name == "word/footnotes.xml":
+                    zout.writestr(name, updated_footnotes)
+                else:
+                    zout.writestr(name, payload)
+
+        temp.replace(src)
+
+    def _replace_placeholders_in_footnotes_raw_xml(self, xml_text: str, values: dict[str, str]) -> str:
+        updated = xml_text
+        for key, raw_value in values.items():
+            value = xml_escape(str(raw_value if raw_value is not None else ""))
+            # Caso 1: placeholder continuo.
+            simple_pattern = re.compile(rf"\{{\{{\s*{re.escape(key)}\s*\}}\}}")
+            updated = simple_pattern.sub(value, updated)
+            # Caso 2: placeholder fragmentado entre <w:t> y posibles tags intermedios (proofErr, etc).
+            updated = self.replace_fragmented_placeholder(updated, key, value)
+        return updated
+
+    def replace_fragmented_placeholder(self, xml_text: str, key: str, value: str) -> str:
+        pattern = re.compile(
+            r"<w:t(?P<t1>[^>]*)>\s*\{\{\s*</w:t>(?P<middle>.*?)<w:t(?P<t2>[^>]*)>\s*\}\}\s*</w:t>",
+            re.DOTALL,
+        )
+
+        def repl(match: re.Match) -> str:
+            middle = match.group("middle")
+            middle_text = re.sub(r"<[^>]+>", "", middle)
+            middle_key = re.sub(r"\s+", "", middle_text)
+            if middle_key != key:
+                return match.group(0)
+            attrs = match.group("t1") or ""
+            return f"<w:t{attrs}>{value}</w:t>"
+
+        return pattern.sub(repl, xml_text)
+
+    def find_remaining_placeholders(self, docx_path: str | Path) -> dict[str, list[str]]:
+        found: dict[str, list[str]] = {}
+        target_parts = {"word/document.xml", "word/footnotes.xml", "word/endnotes.xml"}
+        with ZipFile(docx_path, "r") as zf:
+            for name in zf.namelist():
+                if not (name.startswith("word/") and name.endswith(".xml")):
+                    continue
+                if name not in target_parts and not name.startswith("word/header") and not name.startswith("word/footer"):
+                    continue
+                xml_text = zf.read(name).decode("utf-8", errors="ignore")
+                placeholders = sorted({m.group(1).strip() for m in self._token_pattern.finditer(xml_text)})
+                if placeholders:
+                    found[name] = [f"{{{{{p}}}}}" for p in placeholders]
+        return found
+
+    def diagnose_footnotes(self, docx_path: str | Path) -> dict[str, Any]:
+        report: dict[str, Any] = {
+            "has_footnotes_xml": False,
+            "footnotes_count": 0,
+            "footnote_reference_count": 0,
+            "footnote_reference_ids": 0,
+            "remaining_placeholders_footnotes": [],
+            "reference_note_delta": 0,
+        }
+        with ZipFile(docx_path, "r") as zf:
+            names = zf.namelist()
+            report["has_footnotes_xml"] = "word/footnotes.xml" in names
+            doc_xml = zf.read("word/document.xml").decode("utf-8", errors="ignore") if "word/document.xml" in names else ""
+            report["footnote_reference_count"] = len(re.findall(r"<w:footnoteReference\b", doc_xml))
+            report["footnote_reference_ids"] = len(re.findall(r"<w:footnoteReference[^>]*w:id=\"\d+\"", doc_xml))
+            if "word/footnotes.xml" in names:
+                foot_xml = zf.read("word/footnotes.xml").decode("utf-8", errors="ignore")
+                report["footnotes_count"] = len(re.findall(r"<w:footnote\b", foot_xml))
+                report["remaining_placeholders_footnotes"] = sorted(
+                    {f"{{{{{m.group(1).strip()}}}}}" for m in self._token_pattern.finditer(foot_xml)}
+                )
+            report["reference_note_delta"] = report["footnote_reference_count"] - report["footnotes_count"]
+        return report
+
+    def validate_docx_integrity(self, docx_path: str | Path) -> tuple[bool, list[str]]:
+        errors: list[str] = []
+        required_parseable = ["word/document.xml", "word/footnotes.xml"]
+        critical_duplicates = {"[Content_Types].xml", "word/document.xml", "word/footnotes.xml"}
+
+        try:
+            with ZipFile(docx_path, "r") as zf:
+                infos = zf.infolist()
+                names = [i.filename for i in infos]
+
+                # duplicados críticos
+                for item in critical_duplicates:
+                    if names.count(item) > 1:
+                        errors.append(f"Entrada ZIP duplicada crítica: {item}")
+
+                # parse XML principal / footnotes si existe
+                for name in required_parseable:
+                    if name in names:
+                        try:
+                            ET.fromstring(zf.read(name))
+                        except ET.ParseError as exc:
+                            errors.append(f"XML inválido {name}: {exc}")
+
+                # no placeholders pendientes en footnotes
+                if "word/footnotes.xml" in names:
+                    foot_raw = zf.read("word/footnotes.xml").decode("utf-8", errors="ignore")
+                    remaining_foot = {m.group(1).strip() for m in self._token_pattern.finditer(foot_raw)}
+                    if remaining_foot:
+                        errors.append(
+                            "Placeholders remanentes en word/footnotes.xml: "
+                            + ", ".join(f"{{{{{k}}}}}" for k in sorted(remaining_foot))
+                        )
+                    if "xmlns:w=" in foot_raw and "ns0:" in foot_raw:
+                        errors.append("word/footnotes.xml contiene prefijos ns0 inesperados")
+        except BadZipFile as exc:
+            errors.append(f"DOCX no es ZIP válido: {exc}")
+
+        return (len(errors) == 0, errors)
+
+    def _extract_placeholders_from_xml_part(self, xml_bytes: bytes) -> set[str]:
+        try:
+            root = ET.fromstring(xml_bytes)
+            text_xpath = f".//{{{self._word_ns}}}t"
+            text = "".join(node.text or "" for node in root.findall(text_xpath))
+        except ET.ParseError:
+            text = xml_bytes.decode("utf-8", errors="ignore")
+        return {m.group(1).strip() for m in self._token_pattern.finditer(text)}
+
+    @staticmethod
+    def _is_target_xml_part(name: str) -> bool:
+        if name in {"word/document.xml", "word/footnotes.xml", "word/endnotes.xml", "word/comments.xml"}:
+            return True
+        return name.startswith("word/header") or name.startswith("word/footer")
