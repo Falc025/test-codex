@@ -103,6 +103,22 @@ class DocumentGenerator:
                 filename = self.build_output_filename(display, module.sheet_name)
                 output_path = unique_path(out / filename)
                 self.template_engine.render(selection.template_path, data_display, output_path)
+                diag = self.template_engine.diagnose_footnotes(output_path)
+                if diag["has_footnotes_xml"]:
+                    log_cb(
+                        f"{module_key} fila {row_obj.source_row}: footnotes xml={diag['footnotes_count']} "
+                        f"refs={diag['footnote_reference_count']} delta={diag['reference_note_delta']}"
+                    )
+                    if diag["remaining_placeholders_footnotes"]:
+                        warns += 1
+                        logger.warning(
+                            f"{module_key} fila {row_obj.source_row}: placeholders en footnotes.xml: "
+                            f"{', '.join(diag['remaining_placeholders_footnotes'])}"
+                        )
+                        log_cb(
+                            f"{module_key} fila {row_obj.source_row}: footnotes.xml placeholders -> "
+                            f"{', '.join(diag['remaining_placeholders_footnotes'])}"
+                        )
                 remaining = self.template_engine.find_remaining_placeholders(output_path)
                 if remaining:
                     warns += 1

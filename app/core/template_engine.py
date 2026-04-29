@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import shutil
 from xml.sax.saxutils import escape as xml_escape
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,19 +37,29 @@ class TemplateEngine:
         return TemplateScan(placeholders=found)
 
     def render(self, template_path: str | Path, data: dict[str, str], output_path: str | Path) -> None:
-        doc = Document(template_path)
-        self.replace_placeholders_in_document(doc, data)
-        doc.save(output_path)
-
-        # python-docx puede eliminar partes no soportadas (footnotes/endnotes). Restaurarlas del template.
-        self.restore_footnote_parts_from_template(template_path, output_path)
-
-        # Etapa específica y segura para notas al pie reales (word/footnotes.xml)
-        self.replace_placeholders_in_footnotes_xml_preserving_raw(output_path, data)
+        # Render 100% preservando estructura original del DOCX (incluyendo referencias de notas al pie).
+        shutil.copyfile(template_path, output_path)
+        self.replace_placeholders_in_docx_xml_preserving_raw(output_path, data)
 
         ok, errors = self.validate_docx_integrity(output_path)
         if not ok:
             raise ValueError("DOCX inválido tras procesar notas al pie: " + " | ".join(errors))
+
+    def replace_placeholders_in_docx_xml_preserving_raw(self, docx_path: str | Path, values: dict[str, str]) -> None:
+        src = Path(docx_path)
+        temp = src.with_suffix(".rawxml.tmp.docx")
+        with ZipFile(src, "r") as zin:
+            entries = {name: zin.read(name) for name in zin.namelist()}
+
+        with ZipFile(temp, "w", compression=ZIP_DEFLATED) as zout:
+            for name, payload in entries.items():
+                if self._is_target_xml_part(name):
+                    xml_text = payload.decode("utf-8", errors="ignore")
+                    xml_text = self._replace_placeholders_in_footnotes_raw_xml(xml_text, values)
+                    payload = xml_text.encode("utf-8")
+                zout.writestr(name, payload)
+
+        temp.replace(src)
 
     def restore_footnote_parts_from_template(self, template_path: str | Path, output_path: str | Path) -> None:
         tpl_parts: dict[str, bytes] = {}
@@ -231,6 +242,30 @@ class TemplateEngine:
                     found[name] = [f"{{{{{p}}}}}" for p in placeholders]
         return found
 
+    def diagnose_footnotes(self, docx_path: str | Path) -> dict[str, Any]:
+        report: dict[str, Any] = {
+            "has_footnotes_xml": False,
+            "footnotes_count": 0,
+            "footnote_reference_count": 0,
+            "footnote_reference_ids": 0,
+            "remaining_placeholders_footnotes": [],
+            "reference_note_delta": 0,
+        }
+        with ZipFile(docx_path, "r") as zf:
+            names = zf.namelist()
+            report["has_footnotes_xml"] = "word/footnotes.xml" in names
+            doc_xml = zf.read("word/document.xml").decode("utf-8", errors="ignore") if "word/document.xml" in names else ""
+            report["footnote_reference_count"] = len(re.findall(r"<w:footnoteReference\b", doc_xml))
+            report["footnote_reference_ids"] = len(re.findall(r"<w:footnoteReference[^>]*w:id=\"\d+\"", doc_xml))
+            if "word/footnotes.xml" in names:
+                foot_xml = zf.read("word/footnotes.xml").decode("utf-8", errors="ignore")
+                report["footnotes_count"] = len(re.findall(r"<w:footnote\b", foot_xml))
+                report["remaining_placeholders_footnotes"] = sorted(
+                    {f"{{{{{m.group(1).strip()}}}}}" for m in self._token_pattern.finditer(foot_xml)}
+                )
+            report["reference_note_delta"] = report["footnote_reference_count"] - report["footnotes_count"]
+        return report
+
     def validate_docx_integrity(self, docx_path: str | Path) -> tuple[bool, list[str]]:
         errors: list[str] = []
         required_parseable = ["word/document.xml", "word/footnotes.xml"]
@@ -278,3 +313,9 @@ class TemplateEngine:
         except ET.ParseError:
             text = xml_bytes.decode("utf-8", errors="ignore")
         return {m.group(1).strip() for m in self._token_pattern.finditer(text)}
+
+    @staticmethod
+    def _is_target_xml_part(name: str) -> bool:
+        if name in {"word/document.xml", "word/footnotes.xml", "word/endnotes.xml", "word/comments.xml"}:
+            return True
+        return name.startswith("word/header") or name.startswith("word/footer")
