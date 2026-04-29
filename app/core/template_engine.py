@@ -40,12 +40,68 @@ class TemplateEngine:
         self.replace_placeholders_in_document(doc, data)
         doc.save(output_path)
 
+        # python-docx puede eliminar partes no soportadas (footnotes/endnotes). Restaurarlas del template.
+        self.restore_footnote_parts_from_template(template_path, output_path)
+
         # Etapa específica y segura para notas al pie reales (word/footnotes.xml)
         self.replace_placeholders_in_footnotes_xml_preserving_raw(output_path, data)
 
         ok, errors = self.validate_docx_integrity(output_path)
         if not ok:
             raise ValueError("DOCX inválido tras procesar notas al pie: " + " | ".join(errors))
+
+    def restore_footnote_parts_from_template(self, template_path: str | Path, output_path: str | Path) -> None:
+        tpl_parts: dict[str, bytes] = {}
+        with ZipFile(template_path, "r") as ztpl:
+            for name in (
+                "word/footnotes.xml",
+                "word/endnotes.xml",
+                "word/_rels/document.xml.rels",
+                "[Content_Types].xml",
+            ):
+                if name in ztpl.namelist():
+                    tpl_parts[name] = ztpl.read(name)
+
+        if not tpl_parts:
+            return
+
+        out_path = Path(output_path)
+        temp = out_path.with_suffix(".restore.tmp.docx")
+        with ZipFile(out_path, "r") as zout:
+            out_names = zout.namelist()
+            out_entries = {name: zout.read(name) for name in out_names}
+
+        # Restaurar partes ausentes de notas.
+        for part_name in ("word/footnotes.xml", "word/endnotes.xml"):
+            if part_name in tpl_parts and part_name not in out_entries:
+                out_entries[part_name] = tpl_parts[part_name]
+
+        # Asegurar Relationship de footnotes/endnotes.
+        if "word/_rels/document.xml.rels" in out_entries and "word/_rels/document.xml.rels" in tpl_parts:
+            rels_out = out_entries["word/_rels/document.xml.rels"].decode("utf-8", errors="ignore")
+            rels_tpl = tpl_parts["word/_rels/document.xml.rels"].decode("utf-8", errors="ignore")
+            for rel_type in ("/footnotes", "/endnotes"):
+                if rel_type not in rels_out:
+                    rel_match = re.search(rf"<Relationship[^>]+Type=\"[^\"]*{re.escape(rel_type)}\"[^>]*/>", rels_tpl)
+                    if rel_match:
+                        rels_out = rels_out.replace("</Relationships>", rel_match.group(0) + "</Relationships>")
+            out_entries["word/_rels/document.xml.rels"] = rels_out.encode("utf-8")
+
+        # Asegurar content types para notas.
+        if "[Content_Types].xml" in out_entries and "[Content_Types].xml" in tpl_parts:
+            ct_out = out_entries["[Content_Types].xml"].decode("utf-8", errors="ignore")
+            ct_tpl = tpl_parts["[Content_Types].xml"].decode("utf-8", errors="ignore")
+            for part_name in ("/word/footnotes.xml", "/word/endnotes.xml"):
+                if part_name not in ct_out:
+                    ov = re.search(rf"<Override[^>]+PartName=\"{re.escape(part_name)}\"[^>]*/>", ct_tpl)
+                    if ov:
+                        ct_out = ct_out.replace("</Types>", ov.group(0) + "</Types>")
+            out_entries["[Content_Types].xml"] = ct_out.encode("utf-8")
+
+        with ZipFile(temp, "w", compression=ZIP_DEFLATED) as znew:
+            for name, payload in out_entries.items():
+                znew.writestr(name, payload)
+        temp.replace(out_path)
 
     def replace_placeholders_in_document(self, doc: Document, values: dict[str, str]) -> None:
         for container in self._iter_all_containers(doc):
@@ -145,15 +201,16 @@ class TemplateEngine:
 
     def replace_fragmented_placeholder(self, xml_text: str, key: str, value: str) -> str:
         pattern = re.compile(
-            rf"<w:t(?P<t1>[^>]*)>\s*\{{\{{\s*</w:t>"
-            rf"(?P<m1>(?:\s|<[^>]+>)*?)"
-            rf"<w:t(?P<t2>[^>]*)>\s*{re.escape(key)}\s*</w:t>"
-            rf"(?P<m2>(?:\s|<[^>]+>)*?)"
-            rf"<w:t(?P<t3>[^>]*)>\s*\}}\}}\s*</w:t>",
+            r"<w:t(?P<t1>[^>]*)>\s*\{\{\s*</w:t>(?P<middle>.*?)<w:t(?P<t2>[^>]*)>\s*\}\}\s*</w:t>",
             re.DOTALL,
         )
 
         def repl(match: re.Match) -> str:
+            middle = match.group("middle")
+            middle_text = re.sub(r"<[^>]+>", "", middle)
+            middle_key = re.sub(r"\s+", "", middle_text)
+            if middle_key != key:
+                return match.group(0)
             attrs = match.group("t1") or ""
             return f"<w:t{attrs}>{value}</w:t>"
 
